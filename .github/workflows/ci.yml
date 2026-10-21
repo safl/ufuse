@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) Simon Andreas Frimann Lund <os@safl.dk>
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends meson ninja-build gcc g++
+      - name: Build
+        run: |
+          meson setup build
+          meson compile -C build
+      - name: Test unprivileged
+        run: meson test -C build --print-errorlogs
+      # Mounting a filesystem and creating a character device need root
+      - name: Test as root
+        run: |
+          sudo modprobe cuse
+          sudo meson test -C build --print-errorlogs
+
+  reuse:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: fsfe/reuse-action@v5
