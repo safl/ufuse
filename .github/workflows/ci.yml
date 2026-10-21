@@ -8,12 +8,23 @@ on:
   pull_request:
 
 jobs:
+  # Each Ubuntu brings its own kernel and its own kernel headers, so the protocol version agreed in INIT, and
+  # which of the header's guards for newer protocol fields are compiled, differ between them; 22.04's headers
+  # predate protocol 7.36. One arm64 job checks the structs' layout on a second architecture.
   build-and-test:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Install packages
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends meson ninja-build gcc g++
+      - name: Kernel and header
+        run: |
+          uname -r
+          grep -E "define FUSE_KERNEL_(VERSION|MINOR_VERSION)" /usr/include/linux/fuse.h
       - name: Build
         run: |
           meson setup build
@@ -25,6 +36,7 @@ jobs:
         run: |
           sudo modprobe cuse
           sudo meson test -C build --print-errorlogs
+          grep -h "protocol" build/meson-logs/testlog.txt || true
 
   reuse:
     runs-on: ubuntu-24.04

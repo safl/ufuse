@@ -57,4 +57,5 @@ while [ -e "/dev/$name" ]; do
 	sleep 0.1
 done
 
+grep -h serving "$work/log" || true
 echo "test_cuseecho: ok"

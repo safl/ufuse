@@ -68,4 +68,5 @@ wait "$pid" || fail "hellofs exited with an error"
 pid=""
 if findmnt "$mnt" >/dev/null; then fail "still mounted after hellofs stopped"; fi
 
+grep -h serving "$work/log" || true
 echo "test_hellofs: ok"
