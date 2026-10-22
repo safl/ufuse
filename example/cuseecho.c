@@ -29,60 +29,75 @@ on_signal(int sig)
 }
 
 static void
-serve(struct ufuse_session *s, const struct ufuse_req *req)
+dev_open(const struct ufuse_req *req, uint64_t ino, const struct fuse_open_in *in)
 {
-	uint64_t unique = req->in->unique;
+	struct fuse_open_out out;
+	static uint64_t next;
 
-	switch (req->in->opcode) {
-	case FUSE_OPEN: {
-		struct fuse_open_out out;
-		static uint64_t next;
-
-		memset(&out, 0, sizeof(out));
-		out.fh = next++ % NOPENS;
-		position[out.fh] = 0;
-		ufuse_reply(s, unique, &out, sizeof(out));
-		return;
-	}
-	case FUSE_READ: {
-		const struct fuse_read_in *in = (const struct fuse_read_in *)req->arg;
-		uint64_t *pos = &position[in->fh % NOPENS];
-		size_t n = *pos >= content_nbytes ? 0 : content_nbytes - (size_t)*pos;
-
-		if (n > in->size) {
-			n = in->size;
-		}
-		ufuse_reply(s, unique, content + *pos, n);
-		*pos += n;
-		return;
-	}
-	case FUSE_WRITE: {
-		const struct fuse_write_in *in = (const struct fuse_write_in *)req->arg;
-		const uint8_t *data = (const uint8_t *)req->arg + sizeof(*in);
-		struct fuse_write_out out;
-		size_t n = in->size;
-
-		// Each write replaces the content, the way a shell's "echo x > dev" means it
-		if (n > sizeof(content) || sizeof(*in) + n > req->arg_nbytes) {
-			ufuse_reply_err(s, unique, EFBIG);
-			return;
-		}
-		memcpy(content, data, n);
-		content_nbytes = n;
-		memset(&out, 0, sizeof(out));
-		out.size = (uint32_t)n;
-		ufuse_reply(s, unique, &out, sizeof(out));
-		return;
-	}
-	case FUSE_RELEASE:
-	case FUSE_FLUSH:
-		ufuse_reply(s, unique, NULL, 0);
-		return;
-	default:
-		ufuse_reply_err(s, unique, ENOSYS);
-		return;
-	}
+	(void)ino;
+	(void)in;
+	memset(&out, 0, sizeof(out));
+	out.fh = next++ % NOPENS;
+	position[out.fh] = 0;
+	ufuse_req_reply(req, &out, sizeof(out));
 }
+
+static void
+dev_read(const struct ufuse_req *req, uint64_t ino, const struct fuse_read_in *in)
+{
+	uint64_t *pos = &position[in->fh % NOPENS];
+	size_t n = *pos >= content_nbytes ? 0 : content_nbytes - (size_t)*pos;
+
+	(void)ino;
+	if (n > in->size) {
+		n = in->size;
+	}
+	ufuse_req_reply(req, content + *pos, n);
+	*pos += n;
+}
+
+static void
+dev_write(const struct ufuse_req *req, uint64_t ino, const struct fuse_write_in *in, const void *data, size_t n)
+{
+	struct fuse_write_out out;
+
+	(void)ino;
+	(void)in;
+	// Each write replaces the content, the way a shell's "echo x > dev" means it
+	if (n > sizeof(content)) {
+		ufuse_req_reply_err(req, EFBIG);
+		return;
+	}
+	memcpy(content, data, n);
+	content_nbytes = n;
+	memset(&out, 0, sizeof(out));
+	out.size = (uint32_t)n;
+	ufuse_req_reply(req, &out, sizeof(out));
+}
+
+static void
+dev_release(const struct ufuse_req *req, uint64_t ino, const struct fuse_release_in *in)
+{
+	(void)ino;
+	(void)in;
+	ufuse_req_reply(req, NULL, 0);
+}
+
+static void
+dev_flush(const struct ufuse_req *req, uint64_t ino, const struct fuse_flush_in *in)
+{
+	(void)ino;
+	(void)in;
+	ufuse_req_reply(req, NULL, 0);
+}
+
+static const struct ufuse_ops ops = {
+	.open = dev_open,
+	.read = dev_read,
+	.write = dev_write,
+	.release = dev_release,
+	.flush = dev_flush,
+};
 
 int
 main(int argc, char **argv)
@@ -125,7 +140,7 @@ main(int argc, char **argv)
 		if (n < 0) {
 			break;
 		}
-		serve(&s, &req);
+		ufuse_dispatch(&s, &ops, NULL, buf, (size_t)n);
 	}
 	ufuse_cuse_close(&s);
 	return 0;

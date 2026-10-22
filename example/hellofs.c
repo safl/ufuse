@@ -131,11 +131,54 @@ dir_entry(uint64_t ino, uint64_t index, char *name, size_t nbytes, uint64_t *chi
 }
 
 static void
-serve_read(struct ufuse_session *s, const struct ufuse_req *req)
+fs_lookup(const struct ufuse_req *req, uint64_t parent, const char *name)
 {
-	const struct fuse_read_in *in = (const struct fuse_read_in *)req->arg;
+	struct fuse_entry_out out;
+	uint64_t child = lookup(parent, name);
+
+	if (!child) {
+		ufuse_req_reply_err(req, ENOENT);
+		return;
+	}
+	memset(&out, 0, sizeof(out));
+	out.nodeid = child;
+	out.entry_valid = 1;
+	out.attr_valid = 1;
+	attr_of(child, &out.attr);
+	ufuse_req_reply(req, &out, sizeof(out));
+}
+
+static void
+fs_getattr(const struct ufuse_req *req, uint64_t ino, const struct fuse_getattr_in *in)
+{
+	struct fuse_attr_out out;
+
+	(void)in;
+	memset(&out, 0, sizeof(out));
+	out.attr_valid = 1;
+	if (attr_of(ino, &out.attr)) {
+		ufuse_req_reply_err(req, ENOENT);
+		return;
+	}
+	ufuse_req_reply(req, &out, sizeof(out));
+}
+
+// Dispatch has already refused opens for writing, as the ops are UFUSE_READONLY
+static void
+fs_open(const struct ufuse_req *req, uint64_t ino, const struct fuse_open_in *in)
+{
+	struct fuse_open_out out;
+
+	(void)ino;
+	(void)in;
+	memset(&out, 0, sizeof(out));
+	ufuse_req_reply(req, &out, sizeof(out));
+}
+
+static void
+fs_read(const struct ufuse_req *req, uint64_t ino, const struct fuse_read_in *in)
+{
 	static uint8_t data[UFUSE_MAX_WRITE];
-	uint64_t ino = req->in->nodeid;
 	uint64_t size;
 	uint64_t n;
 	char name[16];
@@ -147,7 +190,7 @@ serve_read(struct ufuse_session *s, const struct ufuse_req *req)
 	} else if (is_file(ino)) {
 		size = 5;
 	} else {
-		ufuse_reply_err(s, req->in->unique, EISDIR);
+		ufuse_req_reply_err(req, EISDIR);
 		return;
 	}
 	n = in->offset >= size ? 0 : size - in->offset;
@@ -169,13 +212,12 @@ serve_read(struct ufuse_session *s, const struct ufuse_req *req)
 			data[i] = (uint8_t)name[off];
 		}
 	}
-	ufuse_reply(s, req->in->unique, data, n);
+	ufuse_req_reply(req, data, n);
 }
 
 static void
-serve_readdir(struct ufuse_session *s, const struct ufuse_req *req)
+fs_readdir(const struct ufuse_req *req, uint64_t ino, const struct fuse_read_in *in)
 {
-	const struct fuse_read_in *in = (const struct fuse_read_in *)req->arg;
 	static uint8_t buf[UFUSE_MAX_WRITE];
 	size_t size = in->size < sizeof(buf) ? in->size : sizeof(buf);
 	size_t used = 0;
@@ -185,7 +227,7 @@ serve_readdir(struct ufuse_session *s, const struct ufuse_req *req)
 	uint32_t type;
 
 	// An entry's offset is the index of the one after it, so a READDIR picks up where the last stopped
-	while (dir_entry(req->in->nodeid, index, name, sizeof(name), &child, &type)) {
+	while (dir_entry(ino, index, name, sizeof(name), &child, &type)) {
 		size_t took = ufuse_dirent_add(buf, used, size, name, child, index + 1, type);
 
 		if (!took) {
@@ -194,98 +236,62 @@ serve_readdir(struct ufuse_session *s, const struct ufuse_req *req)
 		used += took;
 		index++;
 	}
-	ufuse_reply(s, req->in->unique, buf, used);
+	ufuse_req_reply(req, buf, used);
 }
 
 static void
-serve(struct ufuse_session *s, const struct ufuse_req *req)
+fs_statfs(const struct ufuse_req *req, uint64_t ino)
 {
-	uint64_t unique = req->in->unique;
-	uint64_t ino = req->in->nodeid;
+	struct fuse_statfs_out out;
 
-	switch (req->in->opcode) {
-	case FUSE_LOOKUP: {
-		struct fuse_entry_out out;
-		uint64_t child = lookup(ino, (const char *)req->arg);
-
-		memset(&out, 0, sizeof(out));
-		if (!child) {
-			ufuse_reply_err(s, unique, ENOENT);
-			return;
-		}
-		out.nodeid = child;
-		out.entry_valid = 1;
-		out.attr_valid = 1;
-		attr_of(child, &out.attr);
-		ufuse_reply(s, unique, &out, sizeof(out));
-		return;
-	}
-	case FUSE_GETATTR: {
-		struct fuse_attr_out out;
-
-		memset(&out, 0, sizeof(out));
-		out.attr_valid = 1;
-		if (attr_of(ino, &out.attr)) {
-			ufuse_reply_err(s, unique, ENOENT);
-			return;
-		}
-		ufuse_reply(s, unique, &out, sizeof(out));
-		return;
-	}
-	case FUSE_OPEN:
-	case FUSE_OPENDIR: {
-		const struct fuse_open_in *in = (const struct fuse_open_in *)req->arg;
-		struct fuse_open_out out;
-
-		if ((in->flags & O_ACCMODE) != O_RDONLY) {
-			ufuse_reply_err(s, unique, EROFS);
-			return;
-		}
-		memset(&out, 0, sizeof(out));
-		ufuse_reply(s, unique, &out, sizeof(out));
-		return;
-	}
-	case FUSE_READ:
-		serve_read(s, req);
-		return;
-	case FUSE_READDIR:
-		serve_readdir(s, req);
-		return;
-	case FUSE_STATFS: {
-		struct fuse_statfs_out out;
-
-		memset(&out, 0, sizeof(out));
-		out.st.bsize = 4096;
-		out.st.frsize = 4096;
-		out.st.namelen = 255;
-		out.st.files = NFILES + 4;
-		ufuse_reply(s, unique, &out, sizeof(out));
-		return;
-	}
-	case FUSE_RELEASE:
-	case FUSE_RELEASEDIR:
-	case FUSE_FLUSH:
-		ufuse_reply(s, unique, NULL, 0);
-		return;
-	case FUSE_FORGET:
-	case FUSE_BATCH_FORGET:
-		// The kernel expects no reply to a forget
-		return;
-	case FUSE_SETATTR:
-	case FUSE_MKNOD:
-	case FUSE_MKDIR:
-	case FUSE_UNLINK:
-	case FUSE_RMDIR:
-	case FUSE_RENAME:
-	case FUSE_CREATE:
-	case FUSE_WRITE:
-		ufuse_reply_err(s, unique, EROFS);
-		return;
-	default:
-		ufuse_reply_err(s, unique, ENOSYS);
-		return;
-	}
+	(void)ino;
+	memset(&out, 0, sizeof(out));
+	out.st.bsize = 4096;
+	out.st.frsize = 4096;
+	out.st.namelen = 255;
+	out.st.files = NFILES + 4;
+	ufuse_req_reply(req, &out, sizeof(out));
 }
+
+static void
+fs_release(const struct ufuse_req *req, uint64_t ino, const struct fuse_release_in *in)
+{
+	(void)ino;
+	(void)in;
+	ufuse_req_reply(req, NULL, 0);
+}
+
+static void
+fs_flush(const struct ufuse_req *req, uint64_t ino, const struct fuse_flush_in *in)
+{
+	(void)ino;
+	(void)in;
+	ufuse_req_reply(req, NULL, 0);
+}
+
+static void
+fs_destroy(const struct ufuse_req *req, uint64_t nodeid)
+{
+	(void)req;
+	(void)nodeid;
+	stopping = 1;
+}
+
+static const struct ufuse_ops ops = {
+	.flags = UFUSE_READONLY,
+	.want = FUSE_ASYNC_READ | FUSE_BIG_WRITES,
+	.destroy = fs_destroy,
+	.lookup = fs_lookup,
+	.getattr = fs_getattr,
+	.open = fs_open,
+	.read = fs_read,
+	.statfs = fs_statfs,
+	.release = fs_release,
+	.flush = fs_flush,
+	.opendir = fs_open,
+	.readdir = fs_readdir,
+	.releasedir = fs_release,
+};
 
 static int
 dump_big(const char *path)
@@ -334,8 +340,11 @@ main(int argc, char **argv)
 	}
 
 	err = (int)ufuse_read(&s, buf, sizeof(buf), &req);
-	if (err < 0 || ufuse_init_reply(&s, &req, FUSE_ASYNC_READ | FUSE_BIG_WRITES)) {
-		fprintf(stderr, "hellofs: INIT failed\n");
+	if (err >= 0) {
+		err = req.opcode == FUSE_INIT ? ufuse_dispatch(&s, &ops, NULL, buf, (size_t)err) : -EPROTO;
+	}
+	if (err) {
+		fprintf(stderr, "hellofs: INIT: %s\n", strerror(-err));
 		ufuse_unmount(&s, argv[1]);
 		return 1;
 	}
@@ -354,11 +363,7 @@ main(int argc, char **argv)
 			fprintf(stderr, "hellofs: read: %s\n", strerror((int)-n));
 			break;
 		}
-		if (req.in->opcode == FUSE_DESTROY) {
-			ufuse_reply(&s, req.in->unique, NULL, 0);
-			break;
-		}
-		serve(&s, &req);
+		ufuse_dispatch(&s, &ops, NULL, buf, (size_t)n);
 	}
 	ufuse_unmount(&s, argv[1]);
 	return 0;
