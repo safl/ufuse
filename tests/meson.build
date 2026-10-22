@@ -2,9 +2,10 @@
 # Copyright (c) Simon Andreas Frimann Lund <os@safl.dk>
 
 # The same unit test compiled as C and as C++, which is also what shows the header works from both
-test('unit-c', executable('test_unit_c', 'test_unit.c', dependencies: ufuse_dep))
+threads = dependency('threads')
+test('unit-c', executable('test_unit_c', 'test_unit.c', dependencies: [ufuse_dep, threads]))
 if add_languages('cpp', required: false, native: false)
-  test('unit-cxx', executable('test_unit_cxx', 'test_unit_cxx.cpp', dependencies: ufuse_dep,
+  test('unit-cxx', executable('test_unit_cxx', 'test_unit_cxx.cpp', dependencies: [ufuse_dep, threads],
                               override_options: ['cpp_std=c++17']))
 endif
 

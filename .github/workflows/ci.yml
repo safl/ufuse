@@ -9,13 +9,13 @@ on:
 
 jobs:
   # Each Ubuntu brings its own kernel and its own kernel headers, so the protocol version agreed in INIT, and
-  # which of the header's guards for newer protocol fields are compiled, differ between them; 22.04's headers
-  # predate protocol 7.36. One arm64 job checks the structs' layout on a second architecture.
+  # which of the header's guards for newer opcodes are compiled, differ between them; 24.04 has protocol 7.39,
+  # the oldest ufuse supports. One arm64 job checks the structs' layout on a second architecture.
   build-and-test:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

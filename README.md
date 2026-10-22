@@ -12,9 +12,9 @@ single C header, `include/ufuse.h`, usable from C and C++, with no dependency be
 headers.
 
 It does the parts every server repeats and nothing else: opening and mounting a session, the `INIT` and
-`CUSE_INIT` handshakes, reading a request, writing a reply, packing directory entries. What to answer is the
-caller's. There are no callbacks, threads or allocations; a session is a file descriptor to poll beside the
-caller's own.
+`CUSE_INIT` handshakes, reading a request, writing a reply, packing directory entries, and optionally decoding
+a request into a typed callback. What to answer is the caller's. There are no threads or allocations; a
+session is a file descriptor to poll beside the caller's own.
 
 ## Design goals
 
@@ -23,6 +23,10 @@ caller's own.
 - **C and C++**, gnu11 and C++17
 - **Minimal**: the protocol, not a filesystem framework
 - **Loop-agnostic**: the caller reads, dispatches and replies in its own loop
+
+Kernels older than protocol 7.39, Linux 6.6, are a non-goal. From that version on every request struct has
+exactly one size, so the header has no compatibility paths; an older kernel is refused at `INIT`, and older
+kernel headers at compile time.
 
 ## Usage
 
@@ -57,15 +61,66 @@ for (;;) {
 ufuse_unmount(&s, "/mnt/view");
 ```
 
-`example/hellofs.c` is a complete read-only filesystem and `example/cuseecho.c` a character device. Mounting
-is a `mount(2)` call and needs `CAP_SYS_ADMIN`; there is no `fusermount` fallback yet.
+### Dispatch
+
+Instead of switching on opcodes, a server can fill a `struct ufuse_ops` and hand each request to
+`ufuse_dispatch`. It checks the request's length against a table of what each opcode carries, decodes it, and
+calls the opcode's callback. It answers `INIT`, `DESTROY`, `FORGET` and `INTERRUPT` itself, `ENOSYS` where
+there is no callback, `EIO` for a request whose length is not exactly what its opcode carries, and, with
+`UFUSE_READONLY`, `EROFS` for anything that would modify the filesystem or open a file for writing. Every
+opcode up to protocol 7.39 is dispatched, except the DAX mapping opcodes only virtiofs sends.
+
+Every callback takes the request, the node id, the kernel's argument struct when the opcode has one, and then
+the names that follow it as NUL-terminated strings, or the data that follows it and its length: `lookup(req,
+parent, name)`, `mkdir(req, parent, in, name)`, `write(req, ino, in, data, nbytes)`.
+
+```c
+static void
+fs_getattr(const struct ufuse_req *req, uint64_t ino, const struct fuse_getattr_in *in)
+{
+        struct fuse_attr_out out = {.attr_valid = 1};
+
+        if (ino != FUSE_ROOT_ID) {
+                ufuse_req_reply_err(req, ENOENT);
+                return;
+        }
+        ufuse_attr_fill(&out.attr, ino, S_IFDIR | 0555, 2, 0);
+        ufuse_req_reply(req, &out, sizeof(out));
+}
+
+static const struct ufuse_ops ops = {
+        .flags = UFUSE_READONLY,
+        .want = FUSE_ASYNC_READ,
+        .getattr = fs_getattr,
+};
+
+for (;;) {
+        ssize_t n = ufuse_read(&s, buf, sizeof(buf), &req);
+
+        if (n == -EINTR || n == -EAGAIN || n == -ENOENT)
+                continue;
+        if (n < 0)
+                break;
+        ufuse_dispatch(&s, &ops, NULL, buf, n);   /* INIT included */
+}
+```
+
+A callback replies exactly once. Its `req`, names and argument structs point into the request buffer and last
+only for the call, so it replies before returning with `ufuse_req_reply`, or takes a `struct ufuse_defer` with
+`ufuse_req_defer` and answers that later, from any thread, with `ufuse_defer_reply`. Dispatch never replies on
+a callback's behalf.
+
+`example/hellofs.c` is a complete read-only filesystem and `example/cuseecho.c` a character device, both
+written with dispatch; a CUSE server answers `CUSE_INIT` with `ufuse_cuse_init_reply` and dispatches the rest.
+`ufuse_dirent_add` and `ufuse_direntplus_add` pack `READDIR` and `READDIRPLUS` replies.
+Mounting is a `mount(2)` call and needs `CAP_SYS_ADMIN`; there is no `fusermount` fallback yet.
 
 ## Building and testing
 
 ```
 meson setup build
 meson compile -C build
-meson test -C build                 # the unit test, as C and as C++
+meson test -C build                 # the unit test, dispatch included, as C and as C++
 sudo meson test -C build            # also mounts hellofs and creates a cuseecho device
 ```
 
