@@ -19,7 +19,7 @@
  * any include; C++ compilers provide them.
  *
  * @file ufuse.h
- * @version 0.2.0
+ * @version 0.3.0
  */
 #ifndef UFUSE_H
 #define UFUSE_H
@@ -46,7 +46,7 @@
 extern "C" {
 #endif
 
-#define UFUSE_VERSION "0.2.0"
+#define UFUSE_VERSION "0.3.0"
 
 /** The oldest protocol minor version a session accepts: Linux 6.6. From it on, each request struct has one size. */
 #define UFUSE_MIN_MINOR 39
