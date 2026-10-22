@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) Simon Andreas Frimann Lund <os@safl.dk>
 project('ufuse', 'c',
-  version: '0.1.0',
+  version: '0.2.0',
   license: 'BSD-3-Clause',
   meson_version: '>=0.59',
   default_options: [
