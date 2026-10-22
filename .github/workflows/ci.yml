@@ -38,6 +38,14 @@ jobs:
           sudo meson test -C build --print-errorlogs
           grep -h "protocol" build/meson-logs/testlog.txt || true
 
+  # A Meson project taking ufuse installed, through ufuse.pc, and through a wrap
+  meson-consumer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends meson ninja-build gcc pkg-config
+      - run: tests/meson/check.sh
+
   reuse:
     runs-on: ubuntu-24.04
     steps:

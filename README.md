@@ -129,7 +129,26 @@ meson test -C build                 # the unit test, dispatch included, as C and
 sudo meson test -C build            # also mounts hellofs and creates a cuseecho device
 ```
 
-The tests that need root skip without it.
+The tests that need root skip without it. `tests/meson/check.sh` builds a
+consumer against an installed ufuse and through a wrap of the checkout.
+
+### From a Meson project
+
+`dependency('ufuse')` finds an installed ufuse through its `ufuse.pc`, or
+falls back to a wrap in the project's `subprojects/ufuse.wrap`:
+
+```ini
+[wrap-git]
+url = https://github.com/safl/ufuse.git
+revision = <a commit or tag>
+depth = 1
+
+[provide]
+dependency_names = ufuse
+```
+
+As a subproject ufuse declares the header and builds none of its examples
+or tests.
 
 ## Related work
 

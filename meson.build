@@ -23,7 +23,11 @@ pkg.generate(
   name: 'ufuse',
   filebase: 'ufuse',
   description: 'The FUSE and CUSE wire protocol, header-only',
+  url: 'https://github.com/safl/ufuse',
 )
 
-subdir('example')
-subdir('tests')
+# A project taking ufuse through a wrap gets the dependency, not the examples and tests
+if not meson.is_subproject()
+  subdir('example')
+  subdir('tests')
+endif
