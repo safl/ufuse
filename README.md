@@ -113,6 +113,11 @@ a callback's behalf.
 `example/hellofs.c` is a complete read-only filesystem and `example/cuseecho.c` a character device, both
 written with dispatch; a CUSE server answers `CUSE_INIT` with `ufuse_cuse_init_reply` and dispatches the rest.
 `ufuse_dirent_add` and `ufuse_direntplus_add` pack `READDIR` and `READDIRPLUS` replies.
+`ufuse_notify_inval_inode` and `ufuse_notify_inval_entry` tell the kernel to drop
+what it caches of an inode or a name. Dropping only an inode's attributes takes no
+lock a pending request can hold, so a single-threaded server may send it between
+requests; dropping a name waits on the directory's lock, so send that from a thread
+of its own.
 Mounting is a `mount(2)` call and needs `CAP_SYS_ADMIN`; there is no `fusermount` fallback yet.
 
 ## Building and testing

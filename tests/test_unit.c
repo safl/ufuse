@@ -798,6 +798,30 @@ test_dispatch_init(void)
 	fixture_close(&f);
 }
 
+static void
+test_notify(void)
+{
+	struct fixture f;
+	struct fuse_out_header out;
+	uint8_t payload[64];
+	const struct fuse_notify_inval_inode_out *ino = (const struct fuse_notify_inval_inode_out *)payload;
+	const struct fuse_notify_inval_entry_out *ent = (const struct fuse_notify_inval_entry_out *)payload;
+
+	fixture_open(&f);
+	// A notification is a message with no request: unique 0, the notification's code where an error goes
+	CHECK(ufuse_notify_inval_inode(&f.s, 7, -1, 0) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(*ino));
+	CHECK(out.unique == 0 && out.error == FUSE_NOTIFY_INVAL_INODE);
+	CHECK(ino->ino == 7 && ino->off == -1 && ino->len == 0);
+
+	CHECK(ufuse_notify_inval_entry(&f.s, 1, "db.wal") == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(*ent) + 7);
+	CHECK(out.unique == 0 && out.error == FUSE_NOTIFY_INVAL_ENTRY);
+	CHECK(ent->parent == 1 && ent->namelen == 6);
+	CHECK(memcmp(payload + sizeof(*ent), "db.wal", 7) == 0);
+	fixture_close(&f);
+}
+
 int
 main(void)
 {
@@ -811,6 +835,7 @@ main(void)
 	test_dispatch_noreply();
 	test_dispatch_deferred();
 	test_dispatch_init();
+	test_notify();
 	if (failures) {
 		fprintf(stderr, "test_unit: %d failed\n", failures);
 		return 1;

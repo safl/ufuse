@@ -549,6 +549,54 @@ ufuse_defer_reply_err(const struct ufuse_defer *d, int err)
 	return ufuse_reply_err(d->s, d->unique, err);
 }
 
+/**
+ * Tell the kernel to drop what it caches of inode 'ino': its attributes, and with 'off' >= 0 its pages from 'off'
+ * for 'len' bytes, to the end when 'len' is 0. A negative 'off' drops the attributes only, which takes no lock a
+ * pending request can hold, so a single-threaded server may send it between requests.
+ *
+ * @return 0 on success, also when the kernel holds nothing of 'ino'; a negative errno otherwise
+ */
+static inline int
+ufuse_notify_inval_inode(struct ufuse_session *s, uint64_t ino, int64_t off, int64_t len)
+{
+	struct fuse_notify_inval_inode_out out;
+	struct iovec iov;
+
+	memset(&out, 0, sizeof(out));
+	out.ino = ino;
+	out.off = off;
+	out.len = len;
+	iov.iov_base = &out;
+	iov.iov_len = sizeof(out);
+	return ufuse_reply_iov(s, 0, FUSE_NOTIFY_INVAL_INODE, &iov, 1);
+}
+
+/**
+ * Tell the kernel to forget the name 'name' in directory 'parent', so the next use looks it up again
+ *
+ * The kernel takes the directory's lock to do it and waits for it, so it must not be sent while a request on that
+ * directory awaits its reply from the same thread: a single-threaded server deadlocks. Send it from a thread of
+ * its own, or rely on short entry timeouts instead.
+ *
+ * @return 0 on success, also when the kernel holds no such name; a negative errno otherwise
+ */
+static inline int
+ufuse_notify_inval_entry(struct ufuse_session *s, uint64_t parent, const char *name)
+{
+	struct fuse_notify_inval_entry_out out;
+	struct iovec iov[2];
+	size_t namelen = strlen(name);
+
+	memset(&out, 0, sizeof(out));
+	out.parent = parent;
+	out.namelen = (uint32_t)namelen;
+	iov[0].iov_base = &out;
+	iov[0].iov_len = sizeof(out);
+	iov[1].iov_base = (void *)name;
+	iov[1].iov_len = namelen + 1;
+	return ufuse_reply_iov(s, 0, FUSE_NOTIFY_INVAL_ENTRY, iov, 2);
+}
+
 #define UFUSE_OP_NOREPLY 0x1 ///< The kernel expects no reply
 #define UFUSE_OP_MUTATES 0x2 ///< Refused with EROFS under UFUSE_READONLY
 #define UFUSE_OP_DATA 0x4    ///< Data follows the struct and names, its length given in the struct
