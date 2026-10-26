@@ -5,7 +5,9 @@
 # Checks meson.build the two ways a Meson project takes ufuse: installed, found
 # through ufuse.pc, and fetched by a wrap-git of this checkout's HEAD. Each
 # builds example/hellofs.c as a consumer; the wrapped build must not build
-# ufuse's own examples and tests. Run from the repository's top.
+# ufuse's own examples and tests, must install the header and ufuse.pc by
+# default, and must install nothing with skip-install=true. Run from the
+# repository's top.
 set -eu
 
 top=$PWD
@@ -44,6 +46,20 @@ ninja -C "$tmp/c2" > /dev/null
 test -x "$tmp/c2/hellofs"
 if [ -n "$(find "$tmp/c2/subprojects" -name 'test_unit*' -o -name cuseecho)" ]; then
 	echo "a wrapped ufuse built its own examples or tests" >&2
+	exit 1
+fi
+DESTDIR="$tmp/c2-dest" meson install -C "$tmp/c2" > /dev/null
+for f in ufuse.h ufuse.pc; do
+	if [ -z "$(find "$tmp/c2-dest" -name "$f")" ]; then
+		echo "a wrapped ufuse did not install $f" >&2
+		exit 1
+	fi
+done
+
+meson configure -Dufuse:skip-install=true "$tmp/c2" > /dev/null
+DESTDIR="$tmp/c2-skip" meson install -C "$tmp/c2" > /dev/null
+if [ -n "$(find "$tmp/c2-skip" -name 'ufuse*' 2> /dev/null)" ]; then
+	echo "a wrapped ufuse installed with skip-install=true" >&2
 	exit 1
 fi
 echo "meson: installed and wrapped consumers built"

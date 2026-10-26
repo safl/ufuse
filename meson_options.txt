@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) Simon Andreas Frimann Lund <os@safl.dk>
+option('skip-install', type: 'boolean', value: false,
+       description: 'as a subproject: install neither the header nor ufuse.pc')
