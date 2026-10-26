@@ -13,18 +13,21 @@ project('ufuse', 'c',
 )
 
 inc = include_directories('include')
-install_headers('include/ufuse.h')
-
 ufuse_dep = declare_dependency(include_directories: inc)
 meson.override_dependency('ufuse', ufuse_dep)
 
-pkg = import('pkgconfig')
-pkg.generate(
-  name: 'ufuse',
-  filebase: 'ufuse',
-  description: 'The FUSE and CUSE wire protocol, header-only',
-  url: 'https://github.com/safl/ufuse',
-)
+# A parent project that takes ufuse as a subproject only to build against it
+# sets skip-install=true, so nothing of ufuse lands in its prefix
+if not get_option('skip-install')
+  install_headers('include/ufuse.h')
+  pkg = import('pkgconfig')
+  pkg.generate(
+    name: 'ufuse',
+    filebase: 'ufuse',
+    description: 'The FUSE and CUSE wire protocol, header-only',
+    url: 'https://github.com/safl/ufuse',
+  )
+endif
 
 # A project taking ufuse through a wrap gets the dependency, not the examples and tests
 if not meson.is_subproject()

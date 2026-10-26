@@ -148,7 +148,10 @@ dependency_names = ufuse
 ```
 
 As a subproject ufuse declares the header and builds none of its examples
-or tests.
+or tests. It installs the header and `ufuse.pc` into the project's prefix, as
+Meson subprojects do; a project that builds against ufuse without shipping it
+sets `-Dufuse:skip-install=true`, or `default_options: ['skip-install=true']`
+on its `subproject('ufuse')` call.
 
 ## Related work
 
