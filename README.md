@@ -113,6 +113,11 @@ a callback's behalf.
 `example/hellofs.c` is a complete read-only filesystem and `example/cuseecho.c` a character device, both
 written with dispatch; a CUSE server answers `CUSE_INIT` with `ufuse_cuse_init_reply` and dispatches the rest.
 `ufuse_dirent_add` and `ufuse_direntplus_add` pack `READDIR` and `READDIRPLUS` replies.
+`ufuse_reply_ioctl` answers an ioctl with its result and output. A device created with
+`CUSE_UNRESTRICTED_IOCTL` receives every ioctl without data, since the kernel then does
+not decode the command for the size and direction of its argument, which lets the argument
+be a struct that points at a buffer; `ufuse_reply_ioctl_retry` names the ranges of the
+caller's memory to fetch and to write, and the kernel sends the request again with them. `example/cuseecho.c` does both.
 `ufuse_notify_inval_inode` and `ufuse_notify_inval_entry` tell the kernel to drop
 what it caches of an inode or a name. Dropping only an inode's attributes takes no
 lock a pending request can hold, so a single-threaded server may send it between

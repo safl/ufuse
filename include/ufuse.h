@@ -229,7 +229,8 @@ ufuse_req_parse(struct ufuse_session *s, const void *buf, size_t nbytes, struct 
 /**
  * Read one request into 'buf'
  *
- * @param buf At least UFUSE_BUF_NBYTES, or s->max_write plus 4096 when that was changed before INIT
+ * @param buf At least UFUSE_BUF_NBYTES, or s->max_write plus 4096 when that was changed before INIT. A server
+ * of unrestricted ioctls may need more, whatever max_write is; see ::ufuse_reply_ioctl_retry.
  *
  * @return The request's length on success. -EINTR and -EAGAIN mean nothing was read; -ENOENT means the
  * kernel withdrew the request it was about to send; all three ask for another read. -ENODEV means the
@@ -363,7 +364,8 @@ ufuse_init_reply(struct ufuse_session *s, const struct ufuse_req *req, uint64_t 
  *
  * @param devname The device's name under /dev; the caller picks one no other device has
  * @param dev_major,dev_minor 0 and 0 let the kernel choose the numbers
- * @param flags CUSE_UNRESTRICTED_IOCTL to receive ioctls whose arguments the kernel cannot size
+ * @param flags CUSE_UNRESTRICTED_IOCTL to receive every ioctl without the kernel copying its argument, and
+ * fetch what the argument points at with ::ufuse_reply_ioctl_retry
  */
 static inline int
 ufuse_cuse_init_reply(struct ufuse_session *s, const struct ufuse_req *req, const char *devname, uint32_t dev_major,
@@ -547,6 +549,122 @@ static inline int
 ufuse_defer_reply_err(const struct ufuse_defer *d, int err)
 {
 	return ufuse_reply_err(d->s, d->unique, err);
+}
+
+/**
+ * Answer FUSE_IOCTL: the caller's ioctl(2) returns 'result', and 'buf' is its output
+ *
+ * The kernel copies 'buf' to the caller: over the 'out_iov' ranges of ::ufuse_reply_ioctl_retry, in their
+ * order, on a device created with CUSE_UNRESTRICTED_IOCTL, and otherwise to the ioctl's argument, when the
+ * command's encoding says it is read. 'nbytes' is at most the request's out_size; the kernel fails the ioctl
+ * with EIO for more.
+ *
+ * @param result Returned by the caller's ioctl(2); a negative errno fails it
+ * @param buf The output, 'nbytes' of it; may be NULL when 'nbytes' is 0
+ */
+static inline int
+ufuse_reply_ioctl(struct ufuse_session *s, uint64_t unique, int32_t result, const void *buf, size_t nbytes)
+{
+	struct fuse_ioctl_out out;
+	struct iovec iov[2];
+
+	memset(&out, 0, sizeof(out));
+	out.result = result;
+	iov[0].iov_base = &out;
+	iov[0].iov_len = sizeof(out);
+	iov[1].iov_base = (void *)buf;
+	iov[1].iov_len = nbytes;
+	return ufuse_reply_iov(s, unique, 0, iov, nbytes ? 2 : 1);
+}
+
+/**
+ * Answer FUSE_IOCTL by asking the kernel to send the request again with the caller's memory
+ *
+ * Every ioctl of a device created with CUSE_UNRESTRICTED_IOCTL arrives with flag FUSE_IOCTL_UNRESTRICTED and
+ * no data: the kernel does not decode the command for the size and direction of its argument, so the argument
+ * may point at anything. This reply names the ranges of the caller's address space the server needs. The
+ * kernel then sends the request again, under a new 'unique': the bytes of the 'in_iov' ranges follow its
+ * struct fuse_ioctl_in back to back, in_size of them, and out_size is the total length of the 'out_iov'
+ * ranges, which the output of the final ::ufuse_reply_ioctl is copied over. A server tells the rounds apart by
+ * in_size and out_size, and may retry again, e.g. once to fetch a command struct and once more for the buffer
+ * that struct points at.
+ *
+ * A range's 'base' is an address in the caller, e.g. the request's 'arg', and never to be dereferenced by the
+ * server. The kernel takes at most FUSE_IOCTL_MAX_IOV ranges, 'in_iov' and 'out_iov' together, and at most 32
+ * pages in each direction; it fails the caller's ioctl for more, and with EIO for a retry of an ioctl that is
+ * not unrestricted.
+ *
+ * The 32 pages are the kernel's and do not follow max_write, so a retried request carries up to 32 pages after
+ * its headers: 128 KiB with 4 KiB pages, 512 KiB with 16 KiB pages, 2 MiB with 64 KiB pages. The buffer given
+ * to ::ufuse_read must hold such a request, and with pages larger than 4 KiB UFUSE_BUF_NBYTES does not; the
+ * kernel fails a request larger than the buffer it is read into, and the caller's ioctl with EIO.
+ *
+ * For a 32-bit caller of a 64-bit kernel the request's flags have FUSE_IOCTL_COMPAT, and FUSE_IOCTL_32BIT, the
+ * struct at 'arg' has the caller's 32-bit layout, and the kernel fails the ioctl with EIO for a range whose
+ * 'base' or 'len' does not fit 32 bits, so a server checks in->flags before it decodes what it fetched.
+ *
+ * @param in_iov Ranges to fetch, 'in_count' of them; may be NULL when 'in_count' is 0
+ * @param out_iov Ranges the output goes to, 'out_count' of them; may be 'in_iov', or NULL when 'out_count' is 0
+ *
+ * @return 0 on success; -EINVAL, with nothing sent, for more than FUSE_IOCTL_MAX_IOV ranges
+ */
+static inline int
+ufuse_reply_ioctl_retry(struct ufuse_session *s, uint64_t unique, const struct fuse_ioctl_iovec *in_iov,
+                        uint32_t in_count, const struct fuse_ioctl_iovec *out_iov, uint32_t out_count)
+{
+	struct fuse_ioctl_out out;
+	struct iovec iov[3];
+	int count = 1;
+
+	if (in_count > FUSE_IOCTL_MAX_IOV || out_count > FUSE_IOCTL_MAX_IOV ||
+	    in_count + out_count > FUSE_IOCTL_MAX_IOV) {
+		return -EINVAL;
+	}
+	memset(&out, 0, sizeof(out));
+	out.flags = FUSE_IOCTL_RETRY;
+	out.in_iovs = in_count;
+	out.out_iovs = out_count;
+	iov[0].iov_base = &out;
+	iov[0].iov_len = sizeof(out);
+	if (in_count) {
+		iov[count].iov_base = (void *)in_iov;
+		iov[count++].iov_len = in_count * sizeof(*in_iov);
+	}
+	if (out_count) {
+		iov[count].iov_base = (void *)out_iov;
+		iov[count++].iov_len = out_count * sizeof(*out_iov);
+	}
+	return ufuse_reply_iov(s, unique, 0, iov, count);
+}
+
+/** Answer the FUSE_IOCTL 'req'; see ::ufuse_reply_ioctl */
+static inline int
+ufuse_req_reply_ioctl(const struct ufuse_req *req, int32_t result, const void *buf, size_t nbytes)
+{
+	return ufuse_reply_ioctl(req->s, req->unique, result, buf, nbytes);
+}
+
+/** Answer the FUSE_IOCTL 'req' by asking for it again with the caller's memory; see ::ufuse_reply_ioctl_retry */
+static inline int
+ufuse_req_reply_ioctl_retry(const struct ufuse_req *req, const struct fuse_ioctl_iovec *in_iov, uint32_t in_count,
+                            const struct fuse_ioctl_iovec *out_iov, uint32_t out_count)
+{
+	return ufuse_reply_ioctl_retry(req->s, req->unique, in_iov, in_count, out_iov, out_count);
+}
+
+/** Answer a deferred FUSE_IOCTL; see ::ufuse_reply_ioctl */
+static inline int
+ufuse_defer_reply_ioctl(const struct ufuse_defer *d, int32_t result, const void *buf, size_t nbytes)
+{
+	return ufuse_reply_ioctl(d->s, d->unique, result, buf, nbytes);
+}
+
+/** Answer a deferred FUSE_IOCTL by asking for it again with the caller's memory; see ::ufuse_reply_ioctl_retry */
+static inline int
+ufuse_defer_reply_ioctl_retry(const struct ufuse_defer *d, const struct fuse_ioctl_iovec *in_iov, uint32_t in_count,
+                              const struct fuse_ioctl_iovec *out_iov, uint32_t out_count)
+{
+	return ufuse_reply_ioctl_retry(d->s, d->unique, in_iov, in_count, out_iov, out_count);
 }
 
 /**

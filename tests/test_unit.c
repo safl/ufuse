@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) Simon Andreas Frimann Lund <os@safl.dk>
 
-// What ufuse does without a kernel: session defaults, directory entry packing, attributes, opcode names, and
-// dispatch, with a socketpair standing in for /dev/fuse. Written in the subset of C and C++ both accept;
-// test_unit_cxx.cpp compiles it as C++.
+// What ufuse does without a kernel: session defaults, directory entry packing, attributes, opcode names,
+// dispatch, notifications and ioctl replies, with a socketpair standing in for /dev/fuse. Written
+// in the subset of C and C++ both accept; test_unit_cxx.cpp compiles it as C++.
 #include <dirent.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -190,7 +190,7 @@ msg_dispatch(struct fixture *f, const struct ufuse_ops *ops)
 static size_t
 reply_read(struct fixture *f, struct fuse_out_header *out, void *payload, size_t nbytes)
 {
-	uint8_t msg[4096];
+	uint8_t msg[8192];
 	ssize_t n = recv(f->kernel, msg, sizeof(msg), MSG_DONTWAIT);
 	size_t got;
 
@@ -822,6 +822,140 @@ test_notify(void)
 	fixture_close(&f);
 }
 
+// An ioctl whose argument points at a 16-byte struct, which points at a buffer: the first request has no
+// data, and each retry asks for what the bytes fetched so far show is needed
+static void
+cb_ioctl_retry(const struct ufuse_req *req, uint64_t nodeid, const struct fuse_ioctl_in *in, const void *data,
+               size_t nbytes)
+{
+	struct fuse_ioctl_iovec iov[2];
+	uint64_t addr;
+
+	(void)nodeid;
+	rec.calls++;
+	iov[0].base = in->arg;
+	iov[0].len = 16;
+	if (nbytes < 16) {
+		CHECK(ufuse_req_reply_ioctl_retry(req, iov, 1, NULL, 0) == 0);
+		return;
+	}
+	memcpy(&addr, data, sizeof(addr));
+	iov[1].base = addr;
+	iov[1].len = 8;
+	if (in->out_size < 24) {
+		CHECK(ufuse_req_reply_ioctl_retry(req, iov, 1, iov, 2) == 0);
+		return;
+	}
+	CHECK(ufuse_req_reply_ioctl(req, 3, "0123456789abcdefOUTPUT!!", 24) == 0);
+}
+
+static void
+test_ioctl_reply(void)
+{
+	struct fixture f;
+	struct ufuse_ops ops;
+	struct fuse_out_header out;
+	struct fuse_ioctl_in in;
+	struct fuse_ioctl_iovec many[FUSE_IOCTL_MAX_IOV + 1];
+	struct ufuse_defer d;
+	uint8_t payload[sizeof(struct fuse_ioctl_out) + sizeof(many)];
+	struct fuse_ioctl_out io;
+	struct fuse_ioctl_iovec got[3];
+	uint64_t xfer[2] = {0x7f0000002000, 0};
+	size_t i;
+
+	memset(&ops, 0, sizeof(ops));
+	ops.ioctl = cb_ioctl_retry;
+	fixture_open(&f);
+
+	// The first request: no data, so the reply asks for the struct at 'arg'
+	memset(&in, 0, sizeof(in));
+	in.cmd = 0xc0104502;
+	in.arg = 0x7f0000001000;
+	in.flags = FUSE_IOCTL_UNRESTRICTED;
+	msg_start(&f, FUSE_IOCTL, 70, 1, &in, sizeof(in));
+	CHECK(msg_dispatch(&f, &ops) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(io) + sizeof(got[0]));
+	memcpy(&io, payload, sizeof(io));
+	memcpy(got, payload + sizeof(io), sizeof(got[0]));
+	CHECK(out.unique == 70 && out.error == 0);
+	CHECK(io.result == 0 && io.flags == FUSE_IOCTL_RETRY && io.in_iovs == 1 && io.out_iovs == 0);
+	CHECK(got[0].base == 0x7f0000001000 && got[0].len == 16);
+
+	// The retried request carries the struct; the reply asks for it again, and names where the output goes:
+	// the 'in' ranges first, then the 'out' ranges
+	in.in_size = sizeof(xfer);
+	msg_start(&f, FUSE_IOCTL, 71, 1, &in, sizeof(in));
+	msg_add(&f, xfer, sizeof(xfer));
+	CHECK(msg_dispatch(&f, &ops) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(io) + sizeof(got));
+	memcpy(&io, payload, sizeof(io));
+	memcpy(got, payload + sizeof(io), sizeof(got));
+	CHECK(out.unique == 71 && out.error == 0);
+	CHECK(io.result == 0 && io.flags == FUSE_IOCTL_RETRY && io.in_iovs == 1 && io.out_iovs == 2);
+	CHECK(got[0].base == 0x7f0000001000 && got[0].len == 16);
+	CHECK(got[1].base == 0x7f0000001000 && got[1].len == 16);
+	CHECK(got[2].base == 0x7f0000002000 && got[2].len == 8);
+
+	// The request with room for the output is answered with the result and the output after it
+	in.out_size = 24;
+	msg_start(&f, FUSE_IOCTL, 72, 1, &in, sizeof(in));
+	msg_add(&f, xfer, sizeof(xfer));
+	CHECK(msg_dispatch(&f, &ops) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(io) + 24);
+	memcpy(&io, payload, sizeof(io));
+	CHECK(out.unique == 72 && out.error == 0);
+	CHECK(io.result == 3 && io.flags == 0 && io.in_iovs == 0 && io.out_iovs == 0);
+	CHECK(memcmp(payload + sizeof(io), "0123456789abcdefOUTPUT!!", 24) == 0);
+	CHECK(rec.calls == 3);
+
+	// A result alone, e.g. a negative errno, has no output after it
+	CHECK(ufuse_reply_ioctl(&f.s, 73, -EBUSY, NULL, 0) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(io));
+	memcpy(&io, payload, sizeof(io));
+	CHECK(out.unique == 73 && out.error == 0 && io.result == -EBUSY && io.flags == 0);
+
+	// The kernel takes FUSE_IOCTL_MAX_IOV ranges, in and out together; more are not sent
+	for (i = 0; i < sizeof(many) / sizeof(many[0]); i++) {
+		many[i].base = 0x1000 * (i + 1);
+		many[i].len = i + 1;
+	}
+	CHECK(ufuse_reply_ioctl_retry(&f.s, 74, many, FUSE_IOCTL_MAX_IOV + 1, NULL, 0) == -EINVAL);
+	CHECK(ufuse_reply_ioctl_retry(&f.s, 74, NULL, 0, many, FUSE_IOCTL_MAX_IOV + 1) == -EINVAL);
+	CHECK(ufuse_reply_ioctl_retry(&f.s, 74, many, FUSE_IOCTL_MAX_IOV, many, 1) == -EINVAL);
+	CHECK(ufuse_reply_ioctl_retry(&f.s, 74, many, 0xffffffff, many, 2) == -EINVAL);
+	CHECK(reply_read(&f, &out, NULL, 0) == 0);
+	CHECK(ufuse_reply_ioctl_retry(&f.s, 74, many, FUSE_IOCTL_MAX_IOV - 2, many + 3, 2) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) ==
+	      sizeof(out) + sizeof(io) + FUSE_IOCTL_MAX_IOV * sizeof(many[0]));
+	memcpy(&io, payload, sizeof(io));
+	CHECK(out.unique == 74 && io.in_iovs == FUSE_IOCTL_MAX_IOV - 2 && io.out_iovs == 2);
+	CHECK(memcmp(payload + sizeof(io), many, (FUSE_IOCTL_MAX_IOV - 2) * sizeof(many[0])) == 0);
+	CHECK(memcmp(payload + sizeof(io) + (FUSE_IOCTL_MAX_IOV - 2) * sizeof(many[0]), many + 3,
+	             2 * sizeof(many[0])) == 0);
+
+	// No ranges at all is a retry with nothing after the struct
+	CHECK(ufuse_reply_ioctl_retry(&f.s, 75, NULL, 0, NULL, 0) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(io));
+	memcpy(&io, payload, sizeof(io));
+	CHECK(out.unique == 75 && io.flags == FUSE_IOCTL_RETRY && io.in_iovs == 0 && io.out_iovs == 0);
+
+	// A deferred ioctl is answered the same way
+	d.s = &f.s;
+	d.unique = 76;
+	d.ctx = NULL;
+	CHECK(ufuse_defer_reply_ioctl_retry(&d, many, 1, many + 1, 1) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(io) + 2 * sizeof(many[0]));
+	memcpy(&io, payload, sizeof(io));
+	CHECK(out.unique == 76 && io.flags == FUSE_IOCTL_RETRY && io.in_iovs == 1 && io.out_iovs == 1);
+	CHECK(memcmp(payload + sizeof(io), many, 2 * sizeof(many[0])) == 0);
+	CHECK(ufuse_defer_reply_ioctl(&d, 9, "xy", 2) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(io) + 2);
+	memcpy(&io, payload, sizeof(io));
+	CHECK(out.unique == 76 && io.result == 9 && io.flags == 0 && memcmp(payload + sizeof(io), "xy", 2) == 0);
+	fixture_close(&f);
+}
+
 int
 main(void)
 {
@@ -836,6 +970,7 @@ main(void)
 	test_dispatch_deferred();
 	test_dispatch_init();
 	test_notify();
+	test_ioctl_reply();
 	if (failures) {
 		fprintf(stderr, "test_unit: %d failed\n", failures);
 		return 1;
