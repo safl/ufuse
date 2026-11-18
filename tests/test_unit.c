@@ -2,7 +2,7 @@
 // Copyright (c) Simon Andreas Frimann Lund <os@safl.dk>
 
 // What ufuse does without a kernel: session defaults, directory entry packing, attributes, opcode names,
-// dispatch, notifications and ioctl replies, with a socketpair standing in for /dev/fuse. Written
+// dispatch, notifications, ioctl replies and CUSE_INIT, with a socketpair standing in for /dev/fuse. Written
 // in the subset of C and C++ both accept; test_unit_cxx.cpp compiles it as C++.
 #include <dirent.h>
 #include <pthread.h>
@@ -956,6 +956,76 @@ test_ioctl_reply(void)
 	fixture_close(&f);
 }
 
+static void
+test_cuse_init(void)
+{
+	struct fixture f;
+	struct ufuse_req req;
+	struct fuse_out_header out;
+	struct cuse_init_in in;
+	struct cuse_init_out init;
+	uint8_t payload[sizeof(init) + 256];
+	char longname[160];
+
+	fixture_open(&f);
+	f.s.max_read = 8192;
+	f.s.max_write = 1 << 20;
+	memset(&in, 0, sizeof(in));
+	in.major = FUSE_KERNEL_VERSION;
+	in.minor = UFUSE_MIN_MINOR;
+	in.flags = CUSE_UNRESTRICTED_IOCTL;
+
+	// The reply names the device after the struct, as "DEVNAME=<name>" with its NUL, and grants the flag
+	// the server asked for and the kernel offered
+	msg_start(&f, CUSE_INIT, 80, 0, &in, sizeof(in));
+	CHECK(ufuse_req_parse(&f.s, f.buf, f.used, &req) == 0);
+	CHECK(ufuse_cuse_init_reply(&f.s, &req, "xnvme/0000:01:00.0", 0, 0, CUSE_UNRESTRICTED_IOCTL) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(init) + 27);
+	memcpy(&init, payload, sizeof(init));
+	CHECK(out.unique == 80 && out.error == 0);
+	CHECK(init.major == FUSE_KERNEL_VERSION && init.minor == UFUSE_MIN_MINOR && f.s.minor == UFUSE_MIN_MINOR);
+	CHECK(init.flags == CUSE_UNRESTRICTED_IOCTL);
+	CHECK(init.max_read == 8192 && init.max_write == 1 << 20);
+	CHECK(init.dev_major == 0 && init.dev_minor == 0);
+	CHECK(memcmp(payload + sizeof(init), "DEVNAME=xnvme/0000:01:00.0", 27) == 0);
+
+	// A flag the server did not ask for, or the kernel did not offer, is not granted; the numbers are passed on
+	msg_start(&f, CUSE_INIT, 81, 0, &in, sizeof(in));
+	CHECK(ufuse_req_parse(&f.s, f.buf, f.used, &req) == 0);
+	CHECK(ufuse_cuse_init_reply(&f.s, &req, "a", 240, 7, 0) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(init) + 10);
+	memcpy(&init, payload, sizeof(init));
+	CHECK(init.flags == 0 && init.dev_major == 240 && init.dev_minor == 7);
+	in.flags = 0;
+	msg_start(&f, CUSE_INIT, 82, 0, &in, sizeof(in));
+	CHECK(ufuse_req_parse(&f.s, f.buf, f.used, &req) == 0);
+	CHECK(ufuse_cuse_init_reply(&f.s, &req, "a", 0, 0, CUSE_UNRESTRICTED_IOCTL) == 0);
+	CHECK(reply_read(&f, &out, payload, sizeof(payload)) == sizeof(out) + sizeof(init) + 10);
+	memcpy(&init, payload, sizeof(init));
+	CHECK(init.flags == 0);
+
+	// A name that does not fit, a kernel older than 7.39, and a request that is not CUSE_INIT fail
+	memset(longname, 'n', sizeof(longname) - 1);
+	longname[sizeof(longname) - 1] = 0;
+	msg_start(&f, CUSE_INIT, 83, 0, &in, sizeof(in));
+	CHECK(ufuse_req_parse(&f.s, f.buf, f.used, &req) == 0);
+	CHECK(ufuse_cuse_init_reply(&f.s, &req, longname, 0, 0, 0) == -ENAMETOOLONG);
+	CHECK(reply_read(&f, &out, NULL, 0) == sizeof(out));
+	CHECK(out.unique == 83 && out.error == -ENAMETOOLONG);
+	in.minor = UFUSE_MIN_MINOR - 1;
+	msg_start(&f, CUSE_INIT, 84, 0, &in, sizeof(in));
+	CHECK(ufuse_req_parse(&f.s, f.buf, f.used, &req) == 0);
+	CHECK(ufuse_cuse_init_reply(&f.s, &req, "a", 0, 0, 0) == -EPROTO);
+	CHECK(reply_read(&f, &out, NULL, 0) == sizeof(out));
+	CHECK(out.unique == 84 && out.error == -EPROTO);
+	in.minor = UFUSE_MIN_MINOR;
+	msg_start(&f, FUSE_INIT, 85, 0, &in, sizeof(in));
+	CHECK(ufuse_req_parse(&f.s, f.buf, f.used, &req) == 0);
+	CHECK(ufuse_cuse_init_reply(&f.s, &req, "a", 0, 0, 0) == -EPROTO);
+	CHECK(reply_read(&f, &out, NULL, 0) == 0);
+	fixture_close(&f);
+}
+
 int
 main(void)
 {
@@ -971,6 +1041,7 @@ main(void)
 	test_dispatch_init();
 	test_notify();
 	test_ioctl_reply();
+	test_cuse_init();
 	if (failures) {
 		fprintf(stderr, "test_unit: %d failed\n", failures);
 		return 1;
