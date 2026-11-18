@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) Simon Andreas Frimann Lund <os@safl.dk>
 #
-# Creates a character device with cuseecho, writes to it and reads it back, and checks it goes away with
-# the process. Needs root and the cuse module; skips (77) without them.
+# Creates a character device with cuseecho, writes to it and reads it back, sets and fetches its content
+# with unrestricted ioctls, and checks it goes away with the process. Needs root and the cuse module; skips
+# (77) without them.
 #
-#   tests/test_cuseecho.sh build/example/cuseecho
+#   tests/test_cuseecho.sh build/example/cuseecho build/tests/cuseecho_ioctl
 set -eu
 
 CUSEECHO=$1
+CUSEECHO_IOCTL=$2
 [ -c /dev/cuse ] || modprobe cuse 2>/dev/null || true
 if [ "$(id -u)" != 0 ] || [ ! -c /dev/cuse ]; then
 	echo "test_cuseecho: skipped, needs root and /dev/cuse"
@@ -46,6 +48,9 @@ printf 'hello cuse' >"/dev/$name"
 [ "$(cat "/dev/$name")" = "hello cuse" ] || fail "read back: $(cat "/dev/$name")"
 printf 'again' >"/dev/$name"
 [ "$(cat "/dev/$name")" = "again" ] || fail "a second write was not read back"
+
+"$CUSEECHO_IOCTL" "/dev/$name" || fail "the ioctls"
+[ "$(cat "/dev/$name")" = "ioctl" ] || fail "what an ioctl set was not read back"
 
 kill -TERM "$pid"
 wait "$pid" || fail "cuseecho exited with an error"

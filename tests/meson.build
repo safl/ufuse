@@ -12,5 +12,6 @@ endif
 # Mount a filesystem and create a character device; both need root, and skip without it
 test('hellofs', find_program('test_hellofs.sh'), args: [hellofs.full_path()], depends: hellofs,
      is_parallel: false, timeout: 120)
-test('cuseecho', find_program('test_cuseecho.sh'), args: [cuseecho.full_path()], depends: cuseecho,
-     is_parallel: false, timeout: 120)
+cuseecho_ioctl = executable('cuseecho_ioctl', 'cuseecho_ioctl.c', include_directories: '../example')
+test('cuseecho', find_program('test_cuseecho.sh'), args: [cuseecho.full_path(), cuseecho_ioctl.full_path()],
+     depends: [cuseecho, cuseecho_ioctl], is_parallel: false, timeout: 120)

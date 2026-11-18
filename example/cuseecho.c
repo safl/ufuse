@@ -4,6 +4,8 @@
 /**
  * cuseecho: a character device served with ufuse that reads back what was last written to it
  *
+ * The content is also set and fetched with the ioctls of cuseecho.h, which the device takes unrestricted.
+ *
  * Usage: cuseecho NAME       create /dev/NAME, serve until signalled
  *
  * Needs the cuse module and access to /dev/cuse, root by default.
@@ -11,6 +13,8 @@
 #include <signal.h>
 
 #include <ufuse.h>
+
+#include "cuseecho.h"
 
 static volatile sig_atomic_t stopping;
 static uint8_t content[4096];
@@ -91,12 +95,67 @@ dev_flush(const struct ufuse_req *req, uint64_t ino, const struct fuse_flush_in 
 	ufuse_req_reply(req, NULL, 0);
 }
 
+// An unrestricted ioctl arrives without data. Each round asks for what the previous one showed is needed: the
+// struct the argument points at, then the buffer that struct points at; in_size and out_size tell how far the
+// request has come.
+static void
+dev_ioctl(const struct ufuse_req *req, uint64_t ino, const struct fuse_ioctl_in *in, const void *data, size_t n)
+{
+	struct fuse_ioctl_iovec iov[2];
+	struct cuseecho_xfer xfer;
+	uint8_t reply[sizeof(xfer) + sizeof(content)];
+
+	(void)ino;
+	if (in->cmd == CUSEECHO_IOC_NBYTES) {
+		ufuse_req_reply_ioctl(req, (int32_t)content_nbytes, NULL, 0);
+		return;
+	}
+	if (in->cmd != CUSEECHO_IOC_SET && in->cmd != CUSEECHO_IOC_GET) {
+		ufuse_req_reply_err(req, ENOTTY);
+		return;
+	}
+	iov[0].base = in->arg;
+	iov[0].len = sizeof(xfer);
+	if (n < sizeof(xfer)) {
+		ufuse_req_reply_ioctl_retry(req, iov, 1, NULL, 0);
+		return;
+	}
+	memcpy(&xfer, data, sizeof(xfer));
+	if (xfer.nbytes > sizeof(content)) {
+		ufuse_req_reply_err(req, EINVAL);
+		return;
+	}
+	iov[1].base = xfer.addr;
+	iov[1].len = xfer.nbytes;
+
+	if (in->cmd == CUSEECHO_IOC_SET) {
+		if (n < sizeof(xfer) + xfer.nbytes) {
+			ufuse_req_reply_ioctl_retry(req, iov, 2, NULL, 0);
+			return;
+		}
+		memcpy(content, (const uint8_t *)data + sizeof(xfer), xfer.nbytes);
+		content_nbytes = xfer.nbytes;
+		ufuse_req_reply_ioctl(req, 0, NULL, 0);
+		return;
+	}
+
+	if (in->out_size < sizeof(xfer) + xfer.nbytes) {
+		ufuse_req_reply_ioctl_retry(req, iov, 1, iov, 2);
+		return;
+	}
+	xfer.result = (uint32_t)(content_nbytes < xfer.nbytes ? content_nbytes : xfer.nbytes);
+	memcpy(reply, &xfer, sizeof(xfer));
+	memcpy(reply + sizeof(xfer), content, xfer.result);
+	ufuse_req_reply_ioctl(req, 0, reply, sizeof(xfer) + xfer.result);
+}
+
 static const struct ufuse_ops ops = {
 	.open = dev_open,
 	.read = dev_read,
 	.write = dev_write,
 	.release = dev_release,
 	.flush = dev_flush,
+	.ioctl = dev_ioctl,
 };
 
 int
@@ -124,7 +183,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 	err = (int)ufuse_read(&s, buf, sizeof(buf), &req);
-	if (err < 0 || ufuse_cuse_init_reply(&s, &req, argv[1], 0, 0, 0)) {
+	if (err < 0 || ufuse_cuse_init_reply(&s, &req, argv[1], 0, 0, CUSE_UNRESTRICTED_IOCTL)) {
 		fprintf(stderr, "cuseecho: CUSE_INIT failed\n");
 		ufuse_cuse_close(&s);
 		return 1;
